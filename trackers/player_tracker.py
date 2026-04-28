@@ -28,6 +28,10 @@ class PlayerTracker:
     def choose_players(self, court_keypoints, player_dict):
         distances = []
         for track_id, bbox in player_dict.items():
+            # Skip bounding boxes that are too small to be a real player
+            bbox_height = bbox[3] - bbox[1]
+            if bbox_height < 40:
+                continue
             player_center = get_center_of_bbox(bbox)
 
             min_distance = float('inf')
