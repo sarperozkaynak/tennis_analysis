@@ -7,7 +7,12 @@ from utils import measure_distance, get_center_of_bbox
 
 class PlayerTracker:
     def __init__(self,model_path):
-        self.model = YOLO(model_path)
+        self.model_path = model_path
+        self.model = None
+
+    def _load_model(self):
+        if self.model is None:
+            self.model = YOLO(self.model_path)
 
     def choose_and_filter_players(self, court_keypoints, player_detections):
         player_detections_first_frame = player_detections[0]
@@ -57,6 +62,7 @@ class PlayerTracker:
         return player_detections
 
     def detect_frame(self,frame):
+        self._load_model()
         results = self.model.track(frame, persist=True)[0]
         id_name_dict = results.names
 

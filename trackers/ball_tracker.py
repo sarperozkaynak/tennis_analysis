@@ -5,7 +5,12 @@ import pandas as pd
 
 class BallTracker:
     def __init__(self,model_path):
-        self.model = YOLO(model_path)
+        self.model_path = model_path
+        self.model = None
+
+    def _load_model(self):
+        if self.model is None:
+            self.model = YOLO(self.model_path)
 
     def interpolate_ball_positions(self, ball_positions):
         ball_positions = [x.get(1,[]) for x in ball_positions]
@@ -47,7 +52,7 @@ class BallTracker:
                         change_count+=1
             
                 if change_count>minimum_change_frames_for_hit-1:
-                    df_ball_positions['ball_hit'].iloc[i] = 1
+                    df_ball_positions.loc[i, 'ball_hit'] = 1
 
         frame_nums_with_ball_hits = df_ball_positions[df_ball_positions['ball_hit']==1].index.tolist()
 
@@ -72,6 +77,7 @@ class BallTracker:
         return ball_detections
 
     def detect_frame(self,frame):
+        self._load_model()
         results = self.model.predict(frame,conf=0.15)[0]
 
         ball_dict = {}

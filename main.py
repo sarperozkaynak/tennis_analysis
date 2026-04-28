@@ -1,4 +1,4 @@
-from utils import (read_video, 
+from utils import (read_video,
                    save_video,
                    measure_distance,
                    draw_player_stats,
@@ -11,6 +11,8 @@ from mini_court import MiniCourt
 import cv2
 import pandas as pd
 from copy import deepcopy
+import pickle
+import os
 
 
 def main():
@@ -34,9 +36,16 @@ def main():
     
     
     # Court Line Detector model
-    court_model_path = "models/keypoints_model.pth"
-    court_line_detector = CourtLineDetector(court_model_path)
-    court_keypoints = court_line_detector.predict(video_frames[0])
+    court_keypoints_stub = "tracker_stubs/court_keypoints.pkl"
+    if os.path.exists(court_keypoints_stub):
+        with open(court_keypoints_stub, 'rb') as f:
+            court_keypoints = pickle.load(f)
+    else:
+        court_model_path = "models/keypoints_model.pth"
+        court_line_detector = CourtLineDetector(court_model_path)
+        court_keypoints = court_line_detector.predict(video_frames[0])
+        with open(court_keypoints_stub, 'wb') as f:
+            pickle.dump(court_keypoints, f)
 
     # choose players
     player_detections = player_tracker.choose_and_filter_players(court_keypoints, player_detections)
@@ -128,7 +137,11 @@ def main():
     output_video_frames= ball_tracker.draw_bboxes(output_video_frames, ball_detections)
 
     ## Draw court Keypoints
-    output_video_frames  = court_line_detector.draw_keypoints_on_video(output_video_frames, court_keypoints)
+    for frame in output_video_frames:
+        for i in range(0, len(court_keypoints), 2):
+            x, y = int(court_keypoints[i]), int(court_keypoints[i+1])
+            cv2.putText(frame, str(i//2), (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
 
     # Draw Mini Court
     output_video_frames = mini_court.draw_mini_court(output_video_frames)
