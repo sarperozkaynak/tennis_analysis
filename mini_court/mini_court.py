@@ -196,6 +196,11 @@ class MiniCourt():
         output_ball_boxes= []
 
         for frame_num, player_bbox in enumerate(player_boxes):
+            if not player_bbox or 1 not in ball_boxes[frame_num]:
+                output_player_bboxes_dict = {pid: (0, 0) for pid in player_bbox}
+                output_player_boxes.append(output_player_bboxes_dict)
+                output_ball_boxes.append({1: (0, 0)})
+                continue
             ball_box = ball_boxes[frame_num][1]
             ball_position = get_center_of_bbox(ball_box)
             closest_player_id_to_ball = min(player_bbox.keys(), key=lambda x: measure_distance(ball_position, get_center_of_bbox(player_bbox[x])))
@@ -212,8 +217,8 @@ class MiniCourt():
                 # Get Player height in pixels
                 frame_index_min = max(0, frame_num-20)
                 frame_index_max = min(len(player_boxes), frame_num+50)
-                bboxes_heights_in_pixels = [get_height_of_bbox(player_boxes[i][player_id]) for i in range (frame_index_min,frame_index_max)]
-                max_player_height_in_pixels = max(bboxes_heights_in_pixels)
+                bboxes_heights_in_pixels = [get_height_of_bbox(player_boxes[i][player_id]) for i in range(frame_index_min, frame_index_max) if player_id in player_boxes[i]]
+                max_player_height_in_pixels = max(bboxes_heights_in_pixels) if bboxes_heights_in_pixels else get_height_of_bbox(bbox)
 
                 mini_court_player_position = self.get_mini_court_coordinates(foot_position,
                                                                             closest_key_point, 

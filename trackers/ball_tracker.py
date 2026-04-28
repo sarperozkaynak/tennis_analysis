@@ -10,19 +10,23 @@ class BallTracker:
 
     def _load_model(self):
         if self.model is None:
-            self.model = YOLO(self.model_path)
+            import os
+            if os.path.exists(self.model_path):
+                self.model = YOLO(self.model_path)
+                self._fallback = False
+            else:
+                self.model = YOLO('yolov8n.pt')
+                self._fallback = True
 
     def interpolate_ball_positions(self, ball_positions):
-        ball_positions = [x.get(1,[]) for x in ball_positions]
-        # convert the list into pandas dataframe
-        df_ball_positions = pd.DataFrame(ball_positions,columns=['x1','y1','x2','y2'])
-
-        # interpolate the missing values
+        ball_positions_raw = [x.get(1, None) for x in ball_positions]
+        rows = [pos if pos else [None, None, None, None] for pos in ball_positions_raw]
+        df_ball_positions = pd.DataFrame(rows, columns=['x1', 'y1', 'x2', 'y2']).astype(float)
         df_ball_positions = df_ball_positions.interpolate()
         df_ball_positions = df_ball_positions.bfill()
-
-        ball_positions = [{1:x} for x in df_ball_positions.to_numpy().tolist()]
-
+        df_ball_positions = df_ball_positions.ffill()
+        df_ball_positions = df_ball_positions.fillna(0)
+        ball_positions = [{1: x} for x in df_ball_positions.to_numpy().tolist()]
         return ball_positions
 
     def get_ball_shot_frames(self,ball_positions):
@@ -82,6 +86,9 @@ class BallTracker:
 
         ball_dict = {}
         for box in results.boxes:
+            # In fallback mode filter for COCO sports ball class (32)
+            if getattr(self, '_fallback', False) and int(box.cls.tolist()[0]) != 32:
+                continue
             result = box.xyxy.tolist()[0]
             ball_dict[1] = result
         

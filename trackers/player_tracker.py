@@ -15,7 +15,9 @@ class PlayerTracker:
             self.model = YOLO(self.model_path)
 
     def choose_and_filter_players(self, court_keypoints, player_detections):
-        player_detections_first_frame = player_detections[0]
+        player_detections_first_frame = next(
+            (f for f in player_detections if len(f) >= 2), player_detections[0]
+        )
         chosen_player = self.choose_players(court_keypoints, player_detections_first_frame)
         filtered_player_detections = []
         for player_dict in player_detections:
@@ -39,7 +41,7 @@ class PlayerTracker:
         # sorrt the distances in ascending order
         distances.sort(key = lambda x: x[1])
         # Choose the first 2 tracks
-        chosen_players = [distances[0][0], distances[1][0]]
+        chosen_players = [d[0] for d in distances[:2]]
         return chosen_players
 
 
@@ -68,6 +70,8 @@ class PlayerTracker:
 
         player_dict = {}
         for box in results.boxes:
+            if box.id is None:
+                continue
             track_id = int(box.id.tolist()[0])
             result = box.xyxy.tolist()[0]
             object_cls_id = box.cls.tolist()[0]
