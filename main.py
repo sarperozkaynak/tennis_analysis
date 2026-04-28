@@ -32,14 +32,110 @@ def interpolate_player_detections(player_detections):
     return player_detections
 
 
-def estimate_court_keypoints(frame):
-    """Estimate 14 court keypoints from a video frame using classical CV."""
+def _keypoints_from_corners(p0, p1, p2, p3):
+    """Compute all 14 tennis court keypoints from the 4 doubles corners.
+
+    Convention (matches CourtLineDetector training data and MiniCourt):
+      0=far-left  1=far-right  2=near-left  3=near-right  (doubles corners)
+      4=far-left-singles  5=near-left-singles
+      6=far-right-singles 7=near-right-singles
+      8=far-left-service  9=far-right-service
+      10=near-left-service 11=near-right-service
+      12=far-T  13=near-T
+    """
+    t_alley = 1.37 / 10.97   # alley fraction of doubles width
+
+    # Court-depth fractions: 0=far baseline, 1=near baseline
+    t_far_svc  = 5.48 / 23.76  # NO_MANS_LAND_HEIGHT / full court
+    t_near_svc = 1 - t_far_svc
+
+    def lerp(a, b, t):
+        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+    # Points along the far and near baselines
+    p4 = lerp(p0, p1, t_alley)            # far-left singles
+    p6 = lerp(p0, p1, 1 - t_alley)        # far-right singles
+    p5 = lerp(p2, p3, t_alley)            # near-left singles (note: p2=near-left, p3=near-right)
+    p7 = lerp(p2, p3, 1 - t_alley)        # near-right singles
+
+    # Left and right singles sidelines parameterised by depth fraction t (0=far,1=near)
+    def row(t):
+        left  = lerp(p0, p2, t)            # doubles left sideline
+        right = lerp(p1, p3, t)            # doubles right sideline
+        sl    = lerp(left, right, t_alley)        # singles left at this depth
+        sr    = lerp(left, right, 1 - t_alley)    # singles right at this depth
+        return sl, sr
+
+    p8,  p9  = row(t_far_svc)
+    p10, p11 = row(t_near_svc)
+    p12 = lerp(p8,  p9,  0.5)
+    p13 = lerp(p10, p11, 0.5)
+
+    pts = [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13]
+    return np.array([v for p in pts for v in p], dtype=float)
+
+
+def _estimate_keypoints_blue_court(frame):
+    """Detect court keypoints by isolating the blue court surface.
+
+    Works for indoor blue hard courts shot from any angle.
+    Returns None if the court surface cannot be reliably found.
+    """
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Isolate the blue court surface
+    blue_mask = cv2.inRange(hsv, (95, 55, 55), (135, 255, 255))
+    # Ignore the top third — ceiling lights / reflections
+    blue_mask[:int(h * 0.33), :] = 0
+
+    kernel = np.ones((7, 7), np.uint8)
+    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN,  kernel, iterations=2)
+
+    contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    court = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(court) < 0.05 * h * w:
+        return None  # too small — probably not the court
+
+    # Approximate to a simple polygon and find the 4 extreme corners
+    eps = 0.02 * cv2.arcLength(court, True)
+    approx = cv2.approxPolyDP(court, eps, True).reshape(-1, 2).astype(float)
+
+    # Classify: top-left, top-right, bottom-left, bottom-right
+    cx, cy = approx.mean(axis=0)
+    tl = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] < cx and p[1] < cy else float('inf'))
+    tr = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] > cx and p[1] < cy else float('inf'))
+    bl = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] < cx and p[1] > cy else float('inf'))
+    br = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] > cx and p[1] > cy else float('inf'))
+
+    # If quadrant approach yields duplicates fall back to bounding-box corners
+    if len({id(x) for x in [tl, tr, bl, br]}) < 4:
+        xs, ys = approx[:, 0], approx[:, 1]
+        tl = approx[np.argmin(xs + ys)]
+        tr = approx[np.argmin(-xs + ys)]
+        bl = approx[np.argmin(xs - ys)]
+        br = approx[np.argmax(xs + ys)]
+
+    # p0=far-left, p1=far-right (smaller y = higher in image = far end)
+    if tl[1] < bl[1]:
+        p0, p1, p2, p3 = tuple(tl), tuple(tr), tuple(bl), tuple(br)
+    else:
+        p0, p1, p2, p3 = tuple(bl), tuple(br), tuple(tl), tuple(tr)
+
+    return _keypoints_from_corners(p0, p1, p2, p3)
+
+
+def _estimate_keypoints_white_lines(frame):
+    """Original white-line row-sum approach — works well for broadcast footage."""
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     _, white = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
     row_sum = white.sum(axis=1).astype(float)
-    # Smooth and find peaks
     kernel = np.ones(5) / 5
     smoothed = np.convolve(row_sum, kernel, mode='same')
     threshold = smoothed.max() * 0.15
@@ -49,7 +145,6 @@ def estimate_court_keypoints(frame):
             if not peaks or i - peaks[-1] > 20:
                 peaks.append(i)
 
-    # Find x extents at each candidate row
     h_lines = []
     for y in peaks:
         xs = np.where(white[y] > 0)[0]
@@ -57,59 +152,30 @@ def estimate_court_keypoints(frame):
             h_lines.append((y, int(xs.min()), int(xs.max())))
 
     if len(h_lines) < 2:
-        # Fallback: use frame fractions
         h_lines = [
             (int(h * 0.28), int(w * 0.30), int(w * 0.70)),
             (int(h * 0.79), int(w * 0.19), int(w * 0.81)),
         ]
 
     h_lines.sort(key=lambda x: x[0])
-    y_far, x_far_l, x_far_r = h_lines[0]
+    y_far,  x_far_l,  x_far_r  = h_lines[0]
     y_near, x_near_l, x_near_r = h_lines[-1]
 
-    # Estimate net and service line y positions using court proportions
-    y_net = int(y_far + (y_near - y_far) * (11.88 / (11.88 * 2)))
-    y_far_svc = int(y_far + (y_net - y_far) * (5.48 / 11.88))
-    y_near_svc = int(y_near - (y_near - y_net) * (5.48 / 11.88))
+    p0 = (float(x_far_l),  float(y_far))
+    p1 = (float(x_far_r),  float(y_far))
+    p2 = (float(x_near_l), float(y_near))
+    p3 = (float(x_near_r), float(y_near))
+    return _keypoints_from_corners(p0, p1, p2, p3)
 
-    def interp_x(y, y0, x0, y1, x1):
-        if y1 == y0:
-            return x0
-        return int(x0 + (x1 - x0) * (y - y0) / (y1 - y0))
 
-    def singles_inset(x_l, x_r):
-        return int((x_r - x_l) * (1.37 / 10.97))
-
-    # Doubles corners
-    p0 = (x_far_l, y_far)
-    p1 = (x_far_r, y_far)
-    p2 = (x_near_l, y_near)
-    p3 = (x_near_r, y_near)
-
-    # Singles corners
-    inset_far = singles_inset(x_far_l, x_far_r)
-    inset_near = singles_inset(x_near_l, x_near_r)
-    p4 = (x_far_l + inset_far, y_far)
-    p6 = (x_far_r - inset_far, y_far)
-    p5 = (x_near_l + inset_near, y_near)
-    p7 = (x_near_r - inset_near, y_near)
-
-    # Service line points (on singles sidelines)
-    p8x = interp_x(y_far_svc, y_far, p4[0], y_near, p5[0])
-    p9x = interp_x(y_far_svc, y_far, p6[0], y_near, p7[0])
-    p10x = interp_x(y_near_svc, y_far, p4[0], y_near, p5[0])
-    p11x = interp_x(y_near_svc, y_far, p6[0], y_near, p7[0])
-    p8 = (p8x, y_far_svc)
-    p9 = (p9x, y_far_svc)
-    p10 = (p10x, y_near_svc)
-    p11 = (p11x, y_near_svc)
-
-    # Service T marks
-    p12 = ((p8x + p9x) // 2, y_far_svc)
-    p13 = ((p10x + p11x) // 2, y_near_svc)
-
-    points = [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13]
-    return np.array([v for p in points for v in p], dtype=float)
+def estimate_court_keypoints(frame):
+    """Auto-select the best court detection strategy for this frame."""
+    kp = _estimate_keypoints_blue_court(frame)
+    if kp is not None:
+        print("Court detection: blue-court surface method")
+        return kp
+    print("Court detection: white-line method")
+    return _estimate_keypoints_white_lines(frame)
 
 
 def analyze_video(input_video_path, output_video_path, player_tracker, ball_tracker):
