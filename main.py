@@ -16,6 +16,22 @@ import pickle
 import os
 
 
+def interpolate_player_detections(player_detections):
+    """Fill frames where a player was temporarily lost using linear interpolation."""
+    import pandas as pd
+    all_ids = {pid for frame in player_detections for pid in frame}
+    for pid in all_ids:
+        coords = [[frame[pid][0], frame[pid][1], frame[pid][2], frame[pid][3]]
+                  if pid in frame else [None, None, None, None]
+                  for frame in player_detections]
+        df = pd.DataFrame(coords, columns=['x1', 'y1', 'x2', 'y2']).astype(float)
+        df = df.interpolate().bfill().ffill()
+        for i, row in df.iterrows():
+            if pid not in player_detections[i]:
+                player_detections[i][pid] = row.tolist()
+    return player_detections
+
+
 def estimate_court_keypoints(frame):
     """Estimate 14 court keypoints from a video frame using classical CV."""
     h, w = frame.shape[:2]
@@ -139,6 +155,9 @@ def analyze_video(input_video_path, output_video_path, player_tracker, ball_trac
     id_map = {old: new for new, old in enumerate(chosen_ids, start=1)}
     player_detections = [{id_map[pid]: bbox for pid, bbox in frame.items()} for frame in player_detections]
 
+    # Interpolate missing player positions (fill gaps where tracker temporarily loses a player)
+    player_detections = interpolate_player_detections(player_detections)
+
     mini_court = MiniCourt(video_frames[0])
     ball_shot_frames = ball_tracker.get_ball_shot_frames(ball_detections)
 
@@ -242,7 +261,7 @@ def analyze_video(input_video_path, output_video_path, player_tracker, ball_trac
 
 
 def main():
-    player_tracker = PlayerTracker(model_path='yolov8n')
+    player_tracker = PlayerTracker(model_path='yolov8x')
     ball_tracker = BallTracker(model_path='models/yolo5_last.pt')
 
     videos = [
