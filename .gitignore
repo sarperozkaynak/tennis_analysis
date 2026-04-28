@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 *.pyo
-yolov8n.pt
+*.pt
+models/*.pth
