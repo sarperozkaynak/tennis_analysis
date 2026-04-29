@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 *.pt
 models/*.pth
+training/raw_frames/
+training/checkpoints/
