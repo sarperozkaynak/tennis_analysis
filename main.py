@@ -75,57 +75,114 @@ def _keypoints_from_corners(p0, p1, p2, p3):
     return np.array([v for p in pts for v in p], dtype=float)
 
 
-def _estimate_keypoints_blue_court(frame):
-    """Detect court keypoints by isolating the blue court surface.
+def _hull_corners(blue_mask):
+    """Get approximate court corners from the convex hull of the blue area."""
+    contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    court = max(contours, key=cv2.contourArea)
+    hull = cv2.convexHull(court).reshape(-1, 2).astype(float)
+    n = len(hull)
+    if n < 4:
+        return None
+    # Split into top third (far end) and bottom third (near end) by y
+    hull_s = hull[np.argsort(hull[:, 1])]
+    top = hull_s[:max(1, n // 3)]
+    bot = hull_s[min(n - 1, 2 * n // 3):]
+    p0 = tuple(top[np.argmin(top[:, 0])])
+    p1 = tuple(top[np.argmax(top[:, 0])])
+    p2 = tuple(bot[np.argmin(bot[:, 0])])
+    p3 = tuple(bot[np.argmax(bot[:, 0])])
+    return p0, p1, p2, p3
 
-    Works for indoor blue hard courts shot from any angle.
-    Returns None if the court surface cannot be reliably found.
+
+def _estimate_keypoints_blue_court(frame):
+    """Detect court keypoints on indoor blue courts.
+
+    Strategy: HSV-mask the blue surface, then run Hough line detection on
+    the white court markings to find the actual far/near baselines.  Each
+    baseline gives the y-position and x-extents for the doubles corners.
+    Falls back to convex-hull corners when Hough lines are sparse.
+    Returns None when no blue court surface is found.
     """
     h, w = frame.shape[:2]
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    # Isolate the blue court surface
-    blue_mask = cv2.inRange(hsv, (95, 55, 55), (135, 255, 255))
-    # Ignore the top third — ceiling lights / reflections
-    blue_mask[:int(h * 0.33), :] = 0
+    # Isolate blue court surface, ignore top third (ceiling / reflections)
+    blue = cv2.inRange(hsv, (95, 55, 55), (135, 255, 255))
+    blue[:int(h * 0.33), :] = 0
+    k = np.ones((5, 5), np.uint8)
+    blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, k, iterations=2)
+    blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN,  k, iterations=1)
 
-    kernel = np.ones((7, 7), np.uint8)
-    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-    blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN,  kernel, iterations=2)
+    if int(blue.sum()) < int(0.04 * h * w * 255):
+        return None  # too little blue → not this court type
 
-    contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+    # Detect white court lines on/near the court surface
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, white = cv2.threshold(gray, 185, 255, cv2.THRESH_BINARY)
+    search = cv2.dilate(blue, np.ones((5, 5), np.uint8), iterations=8)
+    wc = cv2.bitwise_and(white, white, mask=search)
+
+    lines = cv2.HoughLinesP(wc, 1, np.pi / 180, 35,
+                             minLineLength=40, maxLineGap=30)
+
+    # --- Hough-based baseline detection ---
+    h_segs = []
+    if lines is not None:
+        for x1, y1, x2, y2 in lines[:, 0]:
+            dx = x2 - x1
+            if dx == 0:
+                continue
+            ang = abs(np.degrees(np.arctan2(y2 - y1, dx)))
+            if ang > 90:
+                ang = 180 - ang
+            if ang < 20:  # near-horizontal → baseline or service line
+                h_segs.append((float(min(x1, x2)), float(max(x1, x2)),
+                                float((y1 + y2) / 2)))
+
+    corners = None
+    if len(h_segs) >= 2:
+        # Cluster horizontal segments by y (gap ≤ 35 px = same line)
+        h_segs.sort(key=lambda s: s[2])
+        clusters, cur = [], [h_segs[0]]
+        for seg in h_segs[1:]:
+            if seg[2] - cur[-1][2] < 35:
+                cur.append(seg)
+            else:
+                clusters.append(cur)
+                cur = [seg]
+        clusters.append(cur)
+
+        # Summarise each cluster: (mean_y, min_x, max_x)
+        summarised = [(float(np.mean([s[2] for s in cl])),
+                       min(s[0] for s in cl),
+                       max(s[1] for s in cl))
+                      for cl in clusters]
+
+        # Keep lines that span ≥ 80 px; fall back to all if too few
+        wide = [c for c in summarised if c[2] - c[1] >= 80]
+        if len(wide) < 2:
+            wide = summarised
+        wide.sort(key=lambda c: c[0])
+
+        if len(wide) >= 2:
+            y_far,  x_far_l,  x_far_r  = wide[0]
+            y_near, x_near_l, x_near_r = wide[-1]
+            corners = (
+                (x_far_l,  y_far),
+                (x_far_r,  y_far),
+                (x_near_l, y_near),
+                (x_near_r, y_near),
+            )
+
+    # Fall back to convex hull when Hough produced nothing usable
+    if corners is None:
+        corners = _hull_corners(blue)
+    if corners is None:
         return None
 
-    court = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(court) < 0.05 * h * w:
-        return None  # too small — probably not the court
-
-    # Approximate to a simple polygon and find the 4 extreme corners
-    eps = 0.02 * cv2.arcLength(court, True)
-    approx = cv2.approxPolyDP(court, eps, True).reshape(-1, 2).astype(float)
-
-    # Classify: top-left, top-right, bottom-left, bottom-right
-    cx, cy = approx.mean(axis=0)
-    tl = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] < cx and p[1] < cy else float('inf'))
-    tr = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] > cx and p[1] < cy else float('inf'))
-    bl = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] < cx and p[1] > cy else float('inf'))
-    br = min(approx, key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2 if p[0] > cx and p[1] > cy else float('inf'))
-
-    # If quadrant approach yields duplicates fall back to bounding-box corners
-    if len({id(x) for x in [tl, tr, bl, br]}) < 4:
-        xs, ys = approx[:, 0], approx[:, 1]
-        tl = approx[np.argmin(xs + ys)]
-        tr = approx[np.argmin(-xs + ys)]
-        bl = approx[np.argmin(xs - ys)]
-        br = approx[np.argmax(xs + ys)]
-
-    # p0=far-left, p1=far-right (smaller y = higher in image = far end)
-    if tl[1] < bl[1]:
-        p0, p1, p2, p3 = tuple(tl), tuple(tr), tuple(bl), tuple(br)
-    else:
-        p0, p1, p2, p3 = tuple(bl), tuple(br), tuple(tl), tuple(tr)
-
+    p0, p1, p2, p3 = corners
     return _keypoints_from_corners(p0, p1, p2, p3)
 
 
@@ -168,13 +225,15 @@ def _estimate_keypoints_white_lines(frame):
     return _keypoints_from_corners(p0, p1, p2, p3)
 
 
-def estimate_court_keypoints(frame):
+def estimate_court_keypoints(frame, verbose=True):
     """Auto-select the best court detection strategy for this frame."""
     kp = _estimate_keypoints_blue_court(frame)
     if kp is not None:
-        print("Court detection: blue-court surface method")
+        if verbose:
+            print("Court detection: blue-court surface method")
         return kp
-    print("Court detection: white-line method")
+    if verbose:
+        print("Court detection: white-line method")
     return _estimate_keypoints_white_lines(frame)
 
 
@@ -204,17 +263,31 @@ def analyze_video(input_video_path, output_video_path, player_tracker, ball_trac
     )
     ball_detections = ball_tracker.interpolate_ball_positions(ball_detections)
 
-    # Court keypoints
+    # Court keypoints — computed per frame so a moving camera is handled correctly
     kp_stub = os.path.join(stub_dir, f"{video_name}_court_keypoints.pkl")
     if os.path.exists(kp_stub):
         with open(kp_stub, 'rb') as f:
-            court_keypoints = pickle.load(f)
+            court_keypoints_list = pickle.load(f)
+        # Back-compat: old stubs stored a single array
+        if isinstance(court_keypoints_list, np.ndarray):
+            court_keypoints_list = [court_keypoints_list] * len(video_frames)
     else:
-        court_keypoints = estimate_court_keypoints(video_frames[0])
+        print(f"  Detecting court keypoints for {len(video_frames)} frames …")
+        raw = [estimate_court_keypoints(f, verbose=False) for f in video_frames]
+        # Temporal smoothing: rolling mean over ±5 frames reduces camera-shake jitter
+        arr = np.array(raw, dtype=float)
+        window = 5
+        smoothed = np.zeros_like(arr)
+        for i in range(len(arr)):
+            s = max(0, i - window)
+            e = min(len(arr), i + window + 1)
+            smoothed[i] = arr[s:e].mean(axis=0)
+        court_keypoints_list = smoothed.tolist()
         with open(kp_stub, 'wb') as f:
-            pickle.dump(court_keypoints, f)
+            pickle.dump(court_keypoints_list, f)
 
-    player_detections = player_tracker.choose_and_filter_players(court_keypoints, player_detections)
+    player_detections = player_tracker.choose_and_filter_players(
+        np.array(court_keypoints_list[0]), player_detections)
 
     # Remap track IDs to stable 1/2 so downstream code works regardless of tracker ID
     chosen_ids = sorted({pid for frame in player_detections for pid in frame})
@@ -229,7 +302,7 @@ def analyze_video(input_video_path, output_video_path, player_tracker, ball_trac
 
     player_mini_court_detections, ball_mini_court_detections = \
         mini_court.convert_bounding_boxes_to_mini_court_coordinates(
-            player_detections, ball_detections, court_keypoints
+            player_detections, ball_detections, court_keypoints_list
         )
 
     player_stats_data = [{
@@ -308,9 +381,10 @@ def analyze_video(input_video_path, output_video_path, player_tracker, ball_trac
     output_video_frames = player_tracker.draw_bboxes(video_frames, player_detections)
     output_video_frames = ball_tracker.draw_bboxes(output_video_frames, ball_detections)
 
-    for frame in output_video_frames:
-        for i in range(0, len(court_keypoints), 2):
-            x, y = int(court_keypoints[i]), int(court_keypoints[i+1])
+    for fi, frame in enumerate(output_video_frames):
+        kp = court_keypoints_list[fi]
+        for i in range(0, len(kp), 2):
+            x, y = int(kp[i]), int(kp[i+1])
             cv2.putText(frame, str(i//2), (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
 

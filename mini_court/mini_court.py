@@ -186,7 +186,8 @@ class MiniCourt():
 
         return  mini_court_player_position
 
-    def convert_bounding_boxes_to_mini_court_coordinates(self,player_boxes, ball_boxes, original_court_key_points ):
+    def convert_bounding_boxes_to_mini_court_coordinates(self, player_boxes, ball_boxes,
+                                                           court_keypoints_input):
         player_heights = {
             1: constants.PLAYER_1_HEIGHT_METERS,
             2: constants.PLAYER_2_HEIGHT_METERS
@@ -196,6 +197,12 @@ class MiniCourt():
         output_ball_boxes= []
 
         for frame_num, player_bbox in enumerate(player_boxes):
+            # Accept either a single keypoints array or a per-frame list
+            if isinstance(court_keypoints_input, list):
+                original_court_key_points = np.array(court_keypoints_input[frame_num])
+            else:
+                original_court_key_points = court_keypoints_input
+
             if not player_bbox or 1 not in ball_boxes[frame_num]:
                 output_player_bboxes_dict = {pid: (0, 0) for pid in player_bbox}
                 output_player_boxes.append(output_player_bboxes_dict)
